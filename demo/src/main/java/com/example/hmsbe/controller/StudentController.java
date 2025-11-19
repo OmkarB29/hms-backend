@@ -215,10 +215,23 @@ public class StudentController {
     @PostMapping("/fees/pay")
     public ResponseEntity<?> payFee(
             @RequestHeader(value = "x-test-user", required = false) String xTestUser,
-            @RequestHeader(value = "Authorization", required = false) String auth) {
+            @RequestHeader(value = "Authorization", required = false) String auth,
+            @RequestBody(required = false) Map<String, Object> body) {
+
         String username = resolveUsername(xTestUser, auth);
         if (username == null)
             return ResponseEntity.badRequest().body("Missing user header");
+
+        double paymentAmount = 0.0;
+        if (body != null && body.containsKey("amount")) {
+            try {
+                paymentAmount = Double.parseDouble(String.valueOf(body.get("amount")));
+            } catch (Exception ex) {
+                return ResponseEntity.badRequest().body("Invalid payment amount");
+            }
+        } else {
+            return ResponseEntity.badRequest().body("Payment amount required");
+        }
 
         try {
             List<Fee> allFees = feeRepository.findAll();
@@ -229,13 +242,29 @@ public class StudentController {
                 String sname = fee.getStudentName();
                 if (sname == null) continue;
                 if (sname.equalsIgnoreCase(username) || (fullName != null && sname.equalsIgnoreCase(fullName))) {
-                    fee.setStatus("PAID");
+                    double due = fee.getAmount();
+                    if (paymentAmount >= due) {
+                        fee.setAmount(0);
+                        fee.setStatus("PAID");
+                    } else {
+                        double remaining = due - paymentAmount;
+                        fee.setAmount(remaining);
+                        fee.setStatus("PARTIAL");
+                    }
                     feeRepository.save(fee);
+                    log.info("Processed payment for {}: paid={}, remaining={}", username, paymentAmount, fee.getAmount());
                     return ResponseEntity.ok(fee);
                 }
             }
 
-            return ResponseEntity.ok().body("Fee record not found");
+            // No existing fee record: create a paid record or store zero balance
+            Fee newFee = new Fee();
+            newFee.setStudentName(username);
+            newFee.setAmount(0);
+            newFee.setStatus(paymentAmount > 0 ? "PAID" : "UNPAID");
+            feeRepository.save(newFee);
+            log.info("Created fee record for {} via payment: amountPaid={}", username, paymentAmount);
+            return ResponseEntity.ok(newFee);
         } catch (Exception e) {
             log.error("Error paying fees for username={}", username, e);
             return ResponseEntity.status(500).body("Error processing payment");
